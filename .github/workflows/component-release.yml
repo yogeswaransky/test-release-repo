@@ -34,7 +34,7 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
-          token: ${{ secrets.RDKCM_RDKE }}
+          token: ${{ github.token }}
 
       - name: Set up Git
         run: |
