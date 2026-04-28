@@ -2,7 +2,7 @@ name: Component Release
 
 permissions:
   contents: write
-  
+
 on:
   workflow_dispatch:
     inputs:
@@ -59,20 +59,10 @@ jobs:
           set -e
           git clone https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} project
           cd project
-          git fetch --all
-          git checkout main || git checkout -b main origin/main
-          git checkout develop || git checkout -b develop origin/develop
+          git fetch origin main:main
+          git flow init -d
 
-          git config gitflow.branch.master main
-          git config gitflow.branch.develop develop
-          git config gitflow.prefix.feature feature/
-          git config gitflow.prefix.bugfix bugfix/
-          git config gitflow.prefix.release release/
-          git config gitflow.prefix.hotfix hotfix/
-          git config gitflow.prefix.support support/
-          git config gitflow.prefix.versiontag ''
-
-          echo "git config completed"
+          echo "git flow init completed"
           # Extract version from PR description
           PR_DESC="${{ github.event.pull_request.body }}"
           # Get top tag from CHANGELOG.md
@@ -131,7 +121,7 @@ jobs:
           git push origin main
           git push origin --tags
           git push origin develop
-          
+
       - name: Cleanup tag if workflow fails
         if: failure()
         run: |
