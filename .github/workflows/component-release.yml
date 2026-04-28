@@ -4,6 +4,16 @@ permissions:
   contents: write
   
 on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
   pull_request:
     types: [opened, edited, ready_for_review, closed]
     branches:
@@ -24,7 +34,9 @@ jobs:
           fi
           echo "Validation passed: version field found."
   release:
-    if: github.event.pull_request.merged == true
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
 
     steps:
@@ -75,7 +87,11 @@ jobs:
             exit 1
           fi
           IFS='.' read -r major minor patch <<< "$TOP_TAG"
-          VERSION_TYPE=$(echo "$PR_DESC" | grep -oiP 'version\s*:\s*\K(major|minor|patch)' | tr '[:upper:]' '[:lower:]')
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION_TYPE="${{ github.event.inputs.version_type }}"
+          else
+            VERSION_TYPE=$(echo "$PR_DESC" | grep -oiP 'version\s*:\s*\K(major|minor|patch)' | tr '[:upper:]' '[:lower:]')
+          fi
           if [[ -z "$VERSION_TYPE" ]]; then
             echo "No version type found in PR description, defaulting to PATCH increment."
             patch=$((patch + 1))
