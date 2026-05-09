@@ -1,130 +1,215 @@
 name: Component Release
 
-permissions:
-  contents: write
-
 on:
   workflow_dispatch:
     inputs:
-      version_type:
-        description: 'Version bump type'
+      release_version:
+        description: "Release version (example: 1.0.0)"
+        required: true
+        type: string
+      release_type:
+        description: "Release type"
         required: true
         type: choice
         options:
-          - patch
-          - minor
-          - major
-  pull_request:
-    types: [opened, edited, ready_for_review, closed]
-    branches:
-      - develop
+          - main
+          - hotfix
+      release_mode:
+        description: "Release mode (ignored for hotfix)"
+        required: true
+        type: choice
+        options:
+          - approvable
+          - auto-complete
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
-  validate-version:
-    if: ${{ github.event.action == 'opened' || github.event.action == 'edited' || github.event.action == 'ready_for_review' }}
+  release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ github.event.inputs.release_version }}
+      RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+      RELEASE_MODE: ${{ github.event.inputs.release_mode }}
+      REPO: ${{ github.repository }}
+      ACTOR: ${{ github.actor }}
+      GH_TOKEN: ${{ github.token }}
+
     steps:
-      - name: Validate PR description for version field
-        env:
-          PR_DESC: ${{ github.event.pull_request.body }}
+      - name: Validate version format
         run: |
-          if ! echo "$PR_DESC" | grep -qiE 'version[[:space:]]*:[[:space:]]*(major|minor|patch)'; then
-            echo "ERROR: PR description must include a version field in the format 'version: major|minor|patch' (case-insensitive). Example: version: minor"
+          set -euo pipefail
+          if ! [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version format: ${RELEASE_VERSION}"
+            echo "Expected format: major.minor.patch (e.g. 1.2.3)"
             exit 1
           fi
-          echo "Validation passed: version field found."
-  release:
-    if: >
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
-    runs-on: ubuntu-latest
 
-    steps:
+      - name: Authorize auto-complete (maintainers only)
+        if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'auto-complete' }}
+        run: |
+          set -euo pipefail
+          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" -q '.permission' | tr '[:upper:]' '[:lower:]')
+          echo "Actor '${ACTOR}' permission: ${permission}"
+          case "${permission}" in
+            admin|maintain)
+              echo "Authorization successful."
+              ;;
+            *)
+              echo "ERROR: Only maintainers/owners can run auto-complete releases."
+              exit 1
+              ;;
+          esac
+
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up Git
+      - name: Install release tools
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "187267378+rdkcm-rdke@users.noreply.github.com"
-
-      - name: Install git-flow and auto-changelog
-        run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y git-flow
           npm install -g auto-changelog
 
-      - name: Clone the project and start release
+      - name: Configure git identity
         run: |
-          set -e
-          git clone https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} project
-          cd project
+          set -euo pipefail
+          git config user.name "${ACTOR}"
+          git config user.email "${ACTOR}@users.noreply.github.com"
+
+      - name: Initialize git-flow
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          git checkout develop
+          git reset --hard origin/develop
           git fetch origin main:main
           git flow init -d
 
-          echo "git flow init completed"
-          # Extract version from PR description
-          PR_DESC="${{ github.event.pull_request.body }}"
-          # Get top tag from CHANGELOG.md
-          TOP_TAG=$(grep -m 1 -oP '^#### \[\K[^\]]+' CHANGELOG.md)
-          if [[ -z "$TOP_TAG" ]]; then
-            echo "No version found in CHANGELOG.md!"
-            exit 1
-          fi
-          # Validate TOP_TAG format (semantic versioning: major.minor.patch)
-          if [[ ! "$TOP_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version format in CHANGELOG.md: $TOP_TAG. Expected format: major.minor.patch"
-            exit 1
-          fi
-          IFS='.' read -r major minor patch <<< "$TOP_TAG"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION_TYPE="${{ github.event.inputs.version_type }}"
-          else
-            VERSION_TYPE=$(echo "$PR_DESC" | grep -oiP 'version\s*:\s*\K(major|minor|patch)' | tr '[:upper:]' '[:lower:]')
-          fi
-          if [[ -z "$VERSION_TYPE" ]]; then
-            echo "No version type found in PR description, defaulting to PATCH increment."
-            patch=$((patch + 1))
-          elif [[ "$VERSION_TYPE" == "major" ]]; then
-            major=$((major + 1))
-            minor=0
-            patch=0
-          elif [[ "$VERSION_TYPE" == "minor" ]]; then
-            minor=$((minor + 1))
-            patch=0
-          elif [[ "$VERSION_TYPE" == "patch" ]]; then
-            patch=$((patch + 1))
-          else
-            echo "Invalid version type in PR description: $VERSION_TYPE"
-            exit 1
-          fi
-          RELEASE_VERSION="$major.$minor.$patch"
-          echo "Using calculated version: $RELEASE_VERSION"
-          echo "RELEASE_VERSION=$RELEASE_VERSION"
-          echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_ENV
-          # Check if tag already exists
-          if git rev-parse "refs/tags/$RELEASE_VERSION" >/dev/null 2>&1; then
-            echo "Tag $RELEASE_VERSION already exists. Skipping release."
+      #
+      # ── MAIN RELEASE: AUTO-COMPLETE ──
+      #
+      - name: "Main auto-complete: full release"
+        if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'auto-complete' }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_VERSION} already exists. Skipping."
             exit 0
           fi
-          git flow release start $RELEASE_VERSION
-          auto-changelog -v $RELEASE_VERSION
-          git add CHANGELOG.md
-          git commit -m "$RELEASE_VERSION release changelog updates"
-          git flow release publish
 
-      - name: Finish release and push (default git-flow messages)
-        run: |
-          set -e
-          cd project
-          git flow release finish -m "$RELEASE_VERSION release" $RELEASE_VERSION
+          git flow release start "${RELEASE_VERSION}"
+          auto-changelog -v "${RELEASE_VERSION}"
+          git add CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "${RELEASE_VERSION} release changelog updates"
+          fi
+          git flow release publish "${RELEASE_VERSION}"
+          git flow release finish -m "${RELEASE_VERSION} release" "${RELEASE_VERSION}"
           git push origin main
           git push origin --tags
           git push origin develop
 
-      - name: Cleanup tag if workflow fails
+      #
+      # ── MAIN RELEASE: APPROVABLE ──
+      #
+      - name: "Main approvable: start release and create PR"
+        if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'approvable' }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_VERSION} already exists. Skipping."
+            exit 0
+          fi
+
+          release_branch="release/${RELEASE_VERSION}"
+          if git ls-remote --exit-code --heads origin "${release_branch}" >/dev/null 2>&1; then
+            echo "${release_branch} already exists on remote. Skipping release start."
+          else
+            git flow release start "${RELEASE_VERSION}"
+            auto-changelog -v "${RELEASE_VERSION}"
+            git add CHANGELOG.md
+            if ! git diff --cached --quiet; then
+              git commit -m "${RELEASE_VERSION} release changelog updates"
+            fi
+            git flow release publish "${RELEASE_VERSION}"
+          fi
+
+          existing_pr=$(gh pr list --head "${release_branch}" --base develop --state open --json number -q '.[0].number')
+          if [ -z "${existing_pr}" ]; then
+            gh pr create \
+              --base develop \
+              --head "${release_branch}" \
+              --title "Release ${RELEASE_VERSION}" \
+              --body "Automated release PR for ${RELEASE_VERSION}. Approve this PR to trigger release finish."
+            echo "PR created. Waiting for approval to finish release."
+          else
+            echo "PR from ${release_branch} to develop already exists (#${existing_pr})."
+          fi
+
+      #
+      # ── HOTFIX (always auto-complete, push hotfix branch + tag only) ──
+      #
+      - name: "Hotfix: create hotfix branch and tag"
+        if: ${{ github.event.inputs.release_type == 'hotfix' }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_VERSION} already exists. Skipping."
+            exit 0
+          fi
+
+          hotfix_branch="hotfix/${RELEASE_VERSION}"
+          git checkout main
+          git reset --hard origin/main
+          git flow init -d
+
+          if git ls-remote --exit-code --heads origin "${hotfix_branch}" >/dev/null 2>&1; then
+            echo "${hotfix_branch} already exists. Skipping hotfix start."
+            git checkout -b "${hotfix_branch}" "origin/${hotfix_branch}"
+          else
+            git flow hotfix start "${RELEASE_VERSION}"
+            auto-changelog -v "${RELEASE_VERSION}"
+            git add CHANGELOG.md
+            if ! git diff --cached --quiet; then
+              git commit -m "${RELEASE_VERSION} hotfix changelog updates"
+            fi
+          fi
+
+          git tag -a "${RELEASE_VERSION}" -m "Hotfix ${RELEASE_VERSION}"
+          git push origin "${hotfix_branch}"
+          git push origin --tags
+          echo "Hotfix branch and tag pushed."
+
+      #
+      # ── CLEANUP ON FAILURE ──
+      #
+      - name: Cleanup on failure
         if: failure()
         run: |
-          cd project
-          git tag -d $RELEASE_VERSION || true
-          git push origin :refs/tags/$RELEASE_VERSION || true
+          git tag -d "${RELEASE_VERSION}" 2>/dev/null || true
+          git push origin ":refs/tags/${RELEASE_VERSION}" 2>/dev/null || true
+          if [[ "${RELEASE_TYPE}" == "main" ]]; then
+            git push origin --delete "release/${RELEASE_VERSION}" 2>/dev/null || true
+          else
+            git push origin --delete "hotfix/${RELEASE_VERSION}" 2>/dev/null || true
+          fi
+
+      - name: Workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Component Release Summary"
+            echo "- Repository: ${REPO}"
+            echo "- Actor: ${ACTOR}"
+            echo "- Version: ${RELEASE_VERSION}"
+            echo "- Type: ${RELEASE_TYPE}"
+            echo "- Mode: ${RELEASE_MODE}"
+          } >> "$GITHUB_STEP_SUMMARY"
