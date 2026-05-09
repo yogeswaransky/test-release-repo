@@ -41,9 +41,9 @@ jobs:
       - name: Validate version format
         run: |
           set -euo pipefail
-          if ! [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9._]+)?$ ]]; then
             echo "Invalid version format: ${RELEASE_VERSION}"
-            echo "Expected format: major.minor.patch (e.g. 1.2.3)"
+            echo "Expected format: major.minor.patch or major.minor.patch-suffix (e.g. 1.2.3, 1.2.3-rc1, 3.0.0v1)"
             exit 1
           fi
 
