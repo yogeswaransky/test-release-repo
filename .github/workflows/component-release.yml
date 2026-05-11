@@ -21,6 +21,10 @@ on:
         options:
           - approvable
           - auto-complete
+      source_branch:
+        description: "Source branch for hotfix (e.g. support/1.x). Required for hotfix, ignored for main release."
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -33,6 +37,7 @@ jobs:
       RELEASE_VERSION: ${{ github.event.inputs.release_version }}
       RELEASE_TYPE: ${{ github.event.inputs.release_type }}
       RELEASE_MODE: ${{ github.event.inputs.release_mode }}
+      SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
       REPO: ${{ github.repository }}
       ACTOR: ${{ github.actor }}
       GH_TOKEN: ${{ github.token }}
@@ -154,9 +159,18 @@ jobs:
           fi
 
       #
-      # ── HOTFIX (always auto-complete, push hotfix branch + tag only) ──
+      # ── HOTFIX (always auto-complete, push source branch + tag only) ──
       #
-      - name: "Hotfix: create hotfix branch and tag"
+      - name: "Hotfix: validate source branch input"
+        if: ${{ github.event.inputs.release_type == 'hotfix' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SOURCE_BRANCH}" ]; then
+            echo "ERROR: source_branch is required for hotfix releases."
+            exit 1
+          fi
+
+      - name: "Hotfix: run hotfix flow"
         if: ${{ github.event.inputs.release_type == 'hotfix' }}
         run: |
           set -euo pipefail
@@ -166,27 +180,30 @@ jobs:
             exit 0
           fi
 
-          hotfix_branch="hotfix/${RELEASE_VERSION}"
+          # Checkout main and source branch
           git checkout main
           git reset --hard origin/main
+          git checkout "${SOURCE_BRANCH}"
+          git reset --hard "origin/${SOURCE_BRANCH}"
           git flow init -d
 
-          if git ls-remote --exit-code --heads origin "${hotfix_branch}" >/dev/null 2>&1; then
-            echo "${hotfix_branch} already exists. Skipping hotfix start."
-            git checkout -b "${hotfix_branch}" "origin/${hotfix_branch}"
-          else
-            git flow hotfix start "${RELEASE_VERSION}"
-            auto-changelog -v "${RELEASE_VERSION}"
-            git add CHANGELOG.md
-            if ! git diff --cached --quiet; then
-              git commit -m "${RELEASE_VERSION} hotfix changelog updates"
-            fi
+          # Start hotfix
+          git flow hotfix start "${RELEASE_VERSION}"
+          auto-changelog -v "${RELEASE_VERSION}"
+          git add CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "${RELEASE_VERSION} hotfix release"
           fi
 
-          git tag -a "${RELEASE_VERSION}" -m "Hotfix ${RELEASE_VERSION}"
-          git push origin "${hotfix_branch}"
-          git push origin --tags
-          echo "Hotfix branch and tag pushed."
+          # Finish hotfix (merges to main + develop locally, we only push source branch + tag)
+          git flow hotfix finish -m "Hotfix ${RELEASE_VERSION}" "${RELEASE_VERSION}"
+
+          # Push only source branch and tag
+          git checkout "${SOURCE_BRANCH}"
+          git merge main -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
+          git push origin "${SOURCE_BRANCH}"
+          git push origin "${RELEASE_VERSION}"
+          echo "Hotfix complete: pushed ${SOURCE_BRANCH} and tag ${RELEASE_VERSION}"
 
       #
       # ── CLEANUP ON FAILURE ──
