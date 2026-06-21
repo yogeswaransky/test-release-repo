@@ -56,9 +56,9 @@ jobs:
         if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'auto-complete' }}
         run: |
           set -euo pipefail
-          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" -q '.permission' | tr '[:upper:]' '[:lower:]')
-          echo "Actor '${ACTOR}' permission: ${permission}"
-          case "${permission}" in
+          role=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" -q '.role_name' | tr '[:upper:]' '[:lower:]')
+          echo "Actor '${ACTOR}' role: ${role}"
+          case "${role}" in
             admin|maintain)
               echo "Authorization successful."
               ;;
@@ -180,30 +180,36 @@ jobs:
             exit 0
           fi
 
-          # Checkout main and source branch
-          git checkout main
-          git reset --hard origin/main
-          git checkout "${SOURCE_BRANCH}"
-          git reset --hard "origin/${SOURCE_BRANCH}"
-          git flow init -d
+          git fetch --prune origin
+          if ! git ls-remote --exit-code --heads origin "${SOURCE_BRANCH}" >/dev/null 2>&1; then
+            echo "ERROR: source branch '${SOURCE_BRANCH}' does not exist on origin."
+            exit 1
+          fi
 
-          # Start hotfix
-          git flow hotfix start "${RELEASE_VERSION}"
+          git checkout -B "${SOURCE_BRANCH}" "origin/${SOURCE_BRANCH}"
+
+          hotfix_branch="hotfix/${RELEASE_VERSION}"
+          if git show-ref --verify --quiet "refs/heads/${hotfix_branch}"; then
+            git checkout "${hotfix_branch}"
+          else
+            git checkout -b "${hotfix_branch}" "${SOURCE_BRANCH}"
+          fi
+
           auto-changelog -v "${RELEASE_VERSION}"
           git add CHANGELOG.md
           if ! git diff --cached --quiet; then
             git commit -m "${RELEASE_VERSION} hotfix release"
+          else
+            echo "No CHANGELOG.md changes to commit."
           fi
 
-          # Finish hotfix (merges to main + develop locally, we only push source branch + tag)
-          git flow hotfix finish -m "Hotfix ${RELEASE_VERSION}" "${RELEASE_VERSION}"
-
-          # Push only source branch and tag
           git checkout "${SOURCE_BRANCH}"
-          git merge main -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
+          git merge --no-ff "${hotfix_branch}" -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
+          git tag -a "${RELEASE_VERSION}" -m "Hotfix ${RELEASE_VERSION}"
+
           git push origin "${SOURCE_BRANCH}"
           git push origin "${RELEASE_VERSION}"
-          echo "Hotfix complete: pushed ${SOURCE_BRANCH} and tag ${RELEASE_VERSION}"
+          echo "Hotfix complete: pushed ${SOURCE_BRANCH} and tag ${RELEASE_VERSION}."
 
       #
       # ── CLEANUP ON FAILURE ──
