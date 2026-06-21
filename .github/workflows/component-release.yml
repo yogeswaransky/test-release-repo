@@ -40,7 +40,7 @@ jobs:
       SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
       REPO: ${{ github.repository }}
       ACTOR: ${{ github.actor }}
-      GH_TOKEN: ${{ secrets.RDKCM_RDKE }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Validate version format
@@ -52,27 +52,10 @@ jobs:
             exit 1
           fi
 
-      - name: Authorize auto-complete (maintainers only)
-        if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'auto-complete' }}
-        run: |
-          set -euo pipefail
-          role=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" -q '.role_name' | tr '[:upper:]' '[:lower:]')
-          echo "Actor '${ACTOR}' role: ${role}"
-          case "${role}" in
-            admin|maintain)
-              echo "Authorization successful."
-              ;;
-            *)
-              echo "ERROR: Only maintainers/owners can run auto-complete releases."
-              exit 1
-              ;;
-          esac
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ssh-key: ${{ secrets.RDKCM_DEPLOY_KEY }}
 
       - name: Install release tools
         run: |
