@@ -100,7 +100,7 @@ jobs:
           git push origin develop
 
       - name: Close the release PR
-        if: steps.auth.outputs.is_maintainer == 'true' && steps.approvals.outputs.should_finish == 'true'
+        if: steps.approvals.outputs.should_finish == 'true'
         run: |
           set -euo pipefail
           pr_number="${{ github.event.pull_request.number }}"
