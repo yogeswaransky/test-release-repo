@@ -1,6 +1,6 @@
 # Automated Release Workflow
 
-Automates the git-flow release and hotfix process via GitHub Actions.
+Automates main release and hotfix flows via GitHub Actions.
 
 ## Workflows
 
@@ -17,24 +17,34 @@ Triggered manually from the **Actions** tab via `workflow_dispatch`.
 | `release_mode` | Yes | `approvable` or `auto-complete` (ignored for hotfix) |
 | `source_branch` | Hotfix only | Support branch for hotfix (e.g. `support/1.x`) |
 
+#### Concurrency
+
+Runs are serialized per release key:
+
+- `component-release-<release_type>-<release_version>`
+
+This prevents two runs for the same version/type from racing on branches/tags.
+
 #### Release Modes
 
-**Main release — auto-complete** (maintainers only)
-1. Validates actor has maintainer/owner permission
+**Main release — auto-complete**
+1. Validates version format
 2. `git flow release start` → changelog → `release publish` → `release finish`
 3. Pushes to `main`, `develop`, and tags
 4. Release is complete in a single run
 
-**Main release — approvable** (anyone)
+**Main release — approvable**
 1. `git flow release start` → changelog → `release publish`
 2. Creates a PR: `release/<version>` → `develop`
 3. Stops and waits for PR approval
 4. On approval, the second workflow finishes the release
 
 **Hotfix** (always auto-complete)
-1. Requires `source_branch` input (support branch)
-2. `git flow hotfix start` → changelog → `hotfix finish`
-3. Pushes only the source branch and tag (main/develop are NOT pushed)
+1. Requires `source_branch` input
+2. Validates `source_branch` against `^[A-Za-z0-9._/-]+$`
+3. Creates/uses `hotfix/<version>` from `source_branch`, updates changelog, merges back only into `source_branch`
+4. Creates tag `<version>`
+5. Pushes only `source_branch` and tag (main/develop are NOT pushed)
 
 ### 2. Component Release Finish On Approval (`component-release-finish-on-approval.yml`)
 
@@ -47,6 +57,15 @@ Triggered automatically when a `release/*` PR targeting `develop` is approved.
 4. Pushes `main`, `develop`, and tags
 5. Closes the PR with a comment
 
+## Failure Cleanup Safety
+
+On failure, cleanup only removes refs created by the current run:
+
+- Deletes tag only if the run created that tag
+- Deletes `release/<version>` only if the run created that local release branch
+- Deletes `hotfix/<version>` only if the run created that local hotfix branch
+- Skips cleanup entirely if repository checkout is unavailable
+
 ## Prerequisites
 
 ### Repository Settings
@@ -56,6 +75,7 @@ Triggered automatically when a `release/*` PR targeting `develop` is approved.
 ### Branch Protection (for approvable mode)
 - Enable "Require a pull request before merging" on `develop`
 - Enable "Require approvals" with at least 1 required reviewer
+- If workflow must push directly to `develop` (auto-complete flow), configure appropriate bypass for your automation actor
 
 ## Version Format
 
@@ -67,7 +87,7 @@ Must start with `major.minor.patch` (digits), with an optional alphanumeric suff
 
 ### Auto-complete Release
 ```
-Dispatch → validate version → authorize (maintainer check)
+Dispatch → validate version
   → release start → changelog → release publish → release finish
   → push main + tags + develop → ✅ Done
 ```
@@ -85,7 +105,8 @@ PR approved → finish-on-approval workflow triggers
 
 ### Hotfix
 ```
-Dispatch → validate version → validate source_branch
-  → checkout main + source branch → hotfix start → changelog
-  → hotfix finish → push source branch + tag → ✅ Done
+Dispatch → validate version → validate source_branch (required + safe charset)
+  → create/use hotfix branch from source_branch → changelog
+  → merge hotfix into source_branch → tag
+  → push source_branch + tag → ✅ Done
 ```

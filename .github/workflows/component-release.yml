@@ -30,6 +30,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: component-release-${{ github.event.inputs.release_type }}-${{ github.event.inputs.release_version }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -52,26 +56,18 @@ jobs:
             exit 1
           fi
 
-      - name: Authorize auto-complete (maintainers only)
-        if: ${{ github.event.inputs.release_type == 'main' && github.event.inputs.release_mode == 'auto-complete' }}
-        run: |
-          set -euo pipefail
-          permission=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" -q '.permission' | tr '[:upper:]' '[:lower:]')
-          echo "Actor '${ACTOR}' permission: ${permission}"
-          case "${permission}" in
-            admin|maintain)
-              echo "Authorization successful."
-              ;;
-            *)
-              echo "ERROR: Only maintainers/owners can run auto-complete releases."
-              exit 1
-              ;;
-          esac
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Initialize cleanup flags
+        run: |
+          {
+            echo "CREATED_RELEASE_BRANCH=false"
+            echo "CREATED_HOTFIX_BRANCH=false"
+            echo "CREATED_TAG=false"
+          } >> "$GITHUB_ENV"
 
       - name: Install release tools
         run: |
@@ -109,6 +105,7 @@ jobs:
           fi
 
           git flow release start "${RELEASE_VERSION}"
+          echo "CREATED_RELEASE_BRANCH=true" >> "$GITHUB_ENV"
           auto-changelog -v "${RELEASE_VERSION}"
           git add CHANGELOG.md
           if ! git diff --cached --quiet; then
@@ -116,6 +113,7 @@ jobs:
           fi
           git flow release publish "${RELEASE_VERSION}"
           git flow release finish -m "${RELEASE_VERSION} release" "${RELEASE_VERSION}"
+          echo "CREATED_TAG=true" >> "$GITHUB_ENV"
           git push origin main
           git push origin --tags
           git push origin develop
@@ -138,6 +136,7 @@ jobs:
             echo "${release_branch} already exists on remote. Skipping release start."
           else
             git flow release start "${RELEASE_VERSION}"
+            echo "CREATED_RELEASE_BRANCH=true" >> "$GITHUB_ENV"
             auto-changelog -v "${RELEASE_VERSION}"
             git add CHANGELOG.md
             if ! git diff --cached --quiet; then
@@ -169,6 +168,11 @@ jobs:
             echo "ERROR: source_branch is required for hotfix releases."
             exit 1
           fi
+          if ! [[ "${SOURCE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "ERROR: source_branch contains invalid characters."
+            echo "Only alphanumeric characters, dots, underscores, hyphens, and slashes are allowed."
+            exit 1
+          fi
 
       - name: "Hotfix: run hotfix flow"
         if: ${{ github.event.inputs.release_type == 'hotfix' }}
@@ -180,30 +184,38 @@ jobs:
             exit 0
           fi
 
-          # Checkout main and source branch
-          git checkout main
-          git reset --hard origin/main
-          git checkout "${SOURCE_BRANCH}"
-          git reset --hard "origin/${SOURCE_BRANCH}"
-          git flow init -d
+          git fetch --prune origin
+          if ! git ls-remote --exit-code --heads origin "${SOURCE_BRANCH}" >/dev/null 2>&1; then
+            echo "ERROR: source branch '${SOURCE_BRANCH}' does not exist on origin."
+            exit 1
+          fi
 
-          # Start hotfix
-          git flow hotfix start "${RELEASE_VERSION}"
+          git checkout -B "${SOURCE_BRANCH}" "origin/${SOURCE_BRANCH}"
+
+          hotfix_branch="hotfix/${RELEASE_VERSION}"
+          if git show-ref --verify --quiet "refs/heads/${hotfix_branch}"; then
+            git checkout "${hotfix_branch}"
+          else
+            git checkout -b "${hotfix_branch}" "${SOURCE_BRANCH}"
+            echo "CREATED_HOTFIX_BRANCH=true" >> "$GITHUB_ENV"
+          fi
+
           auto-changelog -v "${RELEASE_VERSION}"
           git add CHANGELOG.md
           if ! git diff --cached --quiet; then
             git commit -m "${RELEASE_VERSION} hotfix release"
+          else
+            echo "No CHANGELOG.md changes to commit."
           fi
 
-          # Finish hotfix (merges to main + develop locally, we only push source branch + tag)
-          git flow hotfix finish -m "Hotfix ${RELEASE_VERSION}" "${RELEASE_VERSION}"
-
-          # Push only source branch and tag
           git checkout "${SOURCE_BRANCH}"
-          git merge main -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
+          git merge --no-ff "${hotfix_branch}" -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
+          git tag -a "${RELEASE_VERSION}" -m "Hotfix ${RELEASE_VERSION}"
+          echo "CREATED_TAG=true" >> "$GITHUB_ENV"
+
           git push origin "${SOURCE_BRANCH}"
           git push origin "${RELEASE_VERSION}"
-          echo "Hotfix complete: pushed ${SOURCE_BRANCH} and tag ${RELEASE_VERSION}"
+          echo "Hotfix complete: pushed ${SOURCE_BRANCH} and tag ${RELEASE_VERSION}."
 
       #
       # ── CLEANUP ON FAILURE ──
@@ -211,12 +223,24 @@ jobs:
       - name: Cleanup on failure
         if: failure()
         run: |
-          git tag -d "${RELEASE_VERSION}" 2>/dev/null || true
-          git push origin ":refs/tags/${RELEASE_VERSION}" 2>/dev/null || true
+          if [ ! -d .git ]; then
+            echo "No repository checkout available. Skipping cleanup."
+            exit 0
+          fi
+
+          if [[ "${CREATED_TAG:-false}" == "true" ]] && git rev-parse -q --verify "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            git tag -d "${RELEASE_VERSION}" 2>/dev/null || true
+            git push origin ":refs/tags/${RELEASE_VERSION}" 2>/dev/null || true
+          fi
+
           if [[ "${RELEASE_TYPE}" == "main" ]]; then
-            git push origin --delete "release/${RELEASE_VERSION}" 2>/dev/null || true
+            if [[ "${CREATED_RELEASE_BRANCH:-false}" == "true" ]] && git show-ref --verify --quiet "refs/heads/release/${RELEASE_VERSION}"; then
+              git push origin --delete "release/${RELEASE_VERSION}" 2>/dev/null || true
+            fi
           else
-            git push origin --delete "hotfix/${RELEASE_VERSION}" 2>/dev/null || true
+            if [[ "${CREATED_HOTFIX_BRANCH:-false}" == "true" ]] && git show-ref --verify --quiet "refs/heads/hotfix/${RELEASE_VERSION}"; then
+              git push origin --delete "hotfix/${RELEASE_VERSION}" 2>/dev/null || true
+            fi
           fi
 
       - name: Workflow summary
