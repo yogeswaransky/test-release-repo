@@ -30,6 +30,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: component-release-${{ github.event.inputs.release_type }}-${{ github.event.inputs.release_version }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -56,6 +60,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Initialize cleanup flags
+        run: |
+          {
+            echo "CREATED_RELEASE_BRANCH=false"
+            echo "CREATED_HOTFIX_BRANCH=false"
+            echo "CREATED_TAG=false"
+          } >> "$GITHUB_ENV"
 
       - name: Install release tools
         run: |
@@ -93,6 +105,7 @@ jobs:
           fi
 
           git flow release start "${RELEASE_VERSION}"
+          echo "CREATED_RELEASE_BRANCH=true" >> "$GITHUB_ENV"
           auto-changelog -v "${RELEASE_VERSION}"
           git add CHANGELOG.md
           if ! git diff --cached --quiet; then
@@ -100,6 +113,7 @@ jobs:
           fi
           git flow release publish "${RELEASE_VERSION}"
           git flow release finish -m "${RELEASE_VERSION} release" "${RELEASE_VERSION}"
+          echo "CREATED_TAG=true" >> "$GITHUB_ENV"
           git push origin main
           git push origin --tags
           git push origin develop
@@ -122,6 +136,7 @@ jobs:
             echo "${release_branch} already exists on remote. Skipping release start."
           else
             git flow release start "${RELEASE_VERSION}"
+            echo "CREATED_RELEASE_BRANCH=true" >> "$GITHUB_ENV"
             auto-changelog -v "${RELEASE_VERSION}"
             git add CHANGELOG.md
             if ! git diff --cached --quiet; then
@@ -153,6 +168,11 @@ jobs:
             echo "ERROR: source_branch is required for hotfix releases."
             exit 1
           fi
+          if ! [[ "${SOURCE_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "ERROR: source_branch contains invalid characters."
+            echo "Only alphanumeric characters, dots, underscores, hyphens, and slashes are allowed."
+            exit 1
+          fi
 
       - name: "Hotfix: run hotfix flow"
         if: ${{ github.event.inputs.release_type == 'hotfix' }}
@@ -177,6 +197,7 @@ jobs:
             git checkout "${hotfix_branch}"
           else
             git checkout -b "${hotfix_branch}" "${SOURCE_BRANCH}"
+            echo "CREATED_HOTFIX_BRANCH=true" >> "$GITHUB_ENV"
           fi
 
           auto-changelog -v "${RELEASE_VERSION}"
@@ -190,6 +211,7 @@ jobs:
           git checkout "${SOURCE_BRANCH}"
           git merge --no-ff "${hotfix_branch}" -m "Merge hotfix ${RELEASE_VERSION} into ${SOURCE_BRANCH}"
           git tag -a "${RELEASE_VERSION}" -m "Hotfix ${RELEASE_VERSION}"
+          echo "CREATED_TAG=true" >> "$GITHUB_ENV"
 
           git push origin "${SOURCE_BRANCH}"
           git push origin "${RELEASE_VERSION}"
@@ -201,12 +223,24 @@ jobs:
       - name: Cleanup on failure
         if: failure()
         run: |
-          git tag -d "${RELEASE_VERSION}" 2>/dev/null || true
-          git push origin ":refs/tags/${RELEASE_VERSION}" 2>/dev/null || true
+          if [ ! -d .git ]; then
+            echo "No repository checkout available. Skipping cleanup."
+            exit 0
+          fi
+
+          if [[ "${CREATED_TAG:-false}" == "true" ]] && git rev-parse -q --verify "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            git tag -d "${RELEASE_VERSION}" 2>/dev/null || true
+            git push origin ":refs/tags/${RELEASE_VERSION}" 2>/dev/null || true
+          fi
+
           if [[ "${RELEASE_TYPE}" == "main" ]]; then
-            git push origin --delete "release/${RELEASE_VERSION}" 2>/dev/null || true
+            if [[ "${CREATED_RELEASE_BRANCH:-false}" == "true" ]] && git show-ref --verify --quiet "refs/heads/release/${RELEASE_VERSION}"; then
+              git push origin --delete "release/${RELEASE_VERSION}" 2>/dev/null || true
+            fi
           else
-            git push origin --delete "hotfix/${RELEASE_VERSION}" 2>/dev/null || true
+            if [[ "${CREATED_HOTFIX_BRANCH:-false}" == "true" ]] && git show-ref --verify --quiet "refs/heads/hotfix/${RELEASE_VERSION}"; then
+              git push origin --delete "hotfix/${RELEASE_VERSION}" 2>/dev/null || true
+            fi
           fi
 
       - name: Workflow summary
